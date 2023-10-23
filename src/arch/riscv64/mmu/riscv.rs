@@ -276,38 +276,43 @@ pub mod sv39_paging {
         let regions: [(usize, usize, super::ProtectionBits); 6] = unsafe {
             [
                 (
-                    crate::TEXT_START,
-                    crate::TEXT_END,
+                    crate::arch::special::TEXT_START,
+                    crate::arch::special::TEXT_END,
                     super::ProtectionBits::Execute,
                 ),
                 (
-                    crate::RODATA_START,
-                    crate::RODATA_END,
+                    crate::arch::special::RODATA_START,
+                    crate::arch::special::RODATA_END,
                     super::ProtectionBits::Read,
                 ),
                 (
-                    crate::DATA_START,
-                    crate::DATA_END,
+                    crate::arch::special::DATA_START,
+                    crate::arch::special::DATA_END,
                     super::ProtectionBits::ReadWrite,
                 ),
                 (
-                    crate::BSS_START,
-                    crate::BSS_END,
+                    crate::arch::special::BSS_START,
+                    crate::arch::special::BSS_END,
                     super::ProtectionBits::ReadWrite,
                 ),
                 (
-                    crate::STACK_BOT,
-                    crate::STACK_TOP,
+                    crate::arch::special::STACK_BOT,
+                    crate::arch::special::STACK_TOP,
                     super::ProtectionBits::ReadWrite,
                 ),
                 (
-                    crate::HEAP_START,
-                    crate::HEAP_END,
+                    crate::arch::special::HEAP_START,
+                    crate::arch::special::HEAP_END,
                     super::ProtectionBits::ReadWrite,
                 ),
             ]
         };
-        let addrs = unsafe { [crate::SYSCON_ADDR, crate::UART_ADDR] };
+        let addrs = unsafe {
+            [
+                crate::arch::special::SYSCON_ADDR,
+                crate::arch::special::UART_ADDR,
+            ]
+        };
 
         for region in regions {
             unsafe {

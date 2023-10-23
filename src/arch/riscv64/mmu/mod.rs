@@ -46,12 +46,30 @@ pub unsafe fn identity_map_region<T: VirtualMemoryScheme>(
 pub fn assert_identity_map<T: VirtualMemoryScheme>(table: &T) {
     let regions: [(usize, usize); 6] = unsafe {
         [
-            (crate::TEXT_START, crate::TEXT_END),
-            (crate::RODATA_START, crate::RODATA_END),
-            (crate::DATA_START, crate::DATA_END),
-            (crate::BSS_START, crate::BSS_END),
-            (crate::STACK_BOT, crate::STACK_TOP),
-            (crate::HEAP_START, crate::HEAP_END),
+            (
+                crate::arch::special::TEXT_START,
+                crate::arch::special::TEXT_END,
+            ),
+            (
+                crate::arch::special::RODATA_START,
+                crate::arch::special::RODATA_END,
+            ),
+            (
+                crate::arch::special::DATA_START,
+                crate::arch::special::DATA_END,
+            ),
+            (
+                crate::arch::special::BSS_START,
+                crate::arch::special::BSS_END,
+            ),
+            (
+                crate::arch::special::STACK_BOT,
+                crate::arch::special::STACK_TOP,
+            ),
+            (
+                crate::arch::special::HEAP_START,
+                crate::arch::special::HEAP_END,
+            ),
         ]
     };
     for region in regions {
