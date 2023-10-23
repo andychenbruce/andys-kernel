@@ -122,7 +122,5 @@ fn kinit() {
 
 #[no_mangle]
 fn kmain() -> ! {
-    loop {
-        
-    }
+    loop {}
 }

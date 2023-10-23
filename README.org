@@ -1,0 +1,4 @@
+** 跑
+#+BEGIN_SRC shell
+  cargo run --target riscv64gc-unknown-none-elf
+#+END_SRC
