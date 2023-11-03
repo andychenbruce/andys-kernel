@@ -12,6 +12,7 @@ lazy_static::lazy_static! {
     pub static ref WRITER: spin::Mutex<crate::uart::UartWriter> = spin::Mutex::new(unsafe { crate::uart::UartWriter::new(UART_ADDR) });
     pub static ref ALLOCATOR: spin::Mutex<crate::heap_alloc::AndyAllocator<4096>> = unsafe {spin::Mutex::new(crate::heap_alloc::AndyAllocator::new(HEAP_START, HEAP_END)) };
 }
+/*
 extern "C" {
     //.text
     static TEXT_START: usize;
@@ -37,7 +38,31 @@ extern "C" {
     static SYSCON_ADDR: usize;
 
     static UART_ADDR: usize;
-}
+    }*/
+
+//.text
+static TEXT_START: usize = 0;
+static TEXT_END: usize = 0;
+//.rodata
+static RODATA_START: usize = 0;
+static RODATA_END: usize = 0;
+
+//.data
+static DATA_START: usize = 0;
+static DATA_END: usize = 0;
+
+//.bss
+static BSS_START: usize = 0;
+static BSS_END: usize = 0;
+
+static STACK_TOP: usize = 0;
+static STACK_BOT: usize = 0;
+static HEAP_START: usize = 0;
+static HEAP_END: usize = 0;
+
+//syscon mmio
+static SYSCON_ADDR: usize = 0x00100000;
+static UART_ADDR: usize = 0x10000000;
 
 fn poweroff() {
     kprintln!("poweroff now");
@@ -57,6 +82,11 @@ fn reboot() {
 
 #[no_mangle]
 pub fn kinit() {
+    let idk: usize;
+    unsafe {
+        core::arch::asm!("mv a1, {}", out(reg) idk);
+    }
+    kprintln!("idk = {}", idk);
     kprintln!("早上好");
     let trap_stack = ALLOCATOR.lock().allocate(10).unwrap();
 

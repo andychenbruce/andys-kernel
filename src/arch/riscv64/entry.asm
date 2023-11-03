@@ -1,3 +1,4 @@
+
 	.section .rodata
 
 	.global MEMORY_START
@@ -32,12 +33,11 @@ BSS_END: .dword bss_end
 
 STACK_TOP: .dword stack_top
 STACK_BOT: .dword stack_bot
-HEAP_START: .dword heap_start
-HEAP_END: .dword heap_end
+//HEAP_START: .dword heap_start
+//HEAP_END: .dword heap_end
 
-SYSCON_ADDR: .dword 0x00100000
-UART_ADDR: .dword 0x10000000
-
+//SYSCON_ADDR: .dword 0x00100000
+//UART_ADDR: .dword 0x10000000
 
 
 	.altmacro
