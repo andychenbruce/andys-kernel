@@ -8,4 +8,5 @@
   "libgccjit"
   "clang-toolchain"
   "dtc"
+  "grub"
 ))
