@@ -1,5 +1,5 @@
 OUTPUT_ARCH(X86_64)
-ENTRY(_start)
+ENTRY(kentry)
  
 SECTIONS
 {

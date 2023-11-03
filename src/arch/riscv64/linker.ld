@@ -1,5 +1,5 @@
 OUTPUT_ARCH(riscv)
-ENTRY(start)
+ENTRY(kentry)
 
 MEMORY {
        RAM (rwx) : ORIGIN = 0x80000000, LENGTH = 0x08000000

@@ -54,7 +54,7 @@ UART_ADDR: .dword 0x10000000
 	
 	.type start, @function
 	.global start
-start:
+kentry:
 	.cfi_startproc
 
 	/* if core not cpu0 skip this and wait for interrupt */
