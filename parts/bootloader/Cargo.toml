@@ -1,0 +1,13 @@
+[package]
+name = "bootloader"
+version = "0.1.0"
+edition = "2021"
+authors = ["陈功 <chengong456@qq.com>"]
+
+[[bin]]
+  name = "bootloader"
+  test = false
+  bench = false
+
+[dependencies]
+
