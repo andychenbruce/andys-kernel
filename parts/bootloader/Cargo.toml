@@ -10,4 +10,7 @@ authors = ["陈功 <chengong456@qq.com>"]
   bench = false
 
 [dependencies]
+log = "0.4.20"
+uefi = "0.26.0"
+uefi-services = "0.23.0"
 
