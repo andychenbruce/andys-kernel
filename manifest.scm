@@ -3,6 +3,4 @@
   "coreutils"
   "libgccjit"
   "clang-toolchain"
-  "dtc"
-  "grub"
-))
+  "dtc" ))
