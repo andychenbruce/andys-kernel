@@ -10,13 +10,26 @@ use uefi::proto::media::file::File;
 #[entry]
 fn main(image: Handle, mut st: SystemTable<Boot>) -> Status {
     uefi_services::init(&mut st).unwrap();
-    info!("Hello world!");
+    
 
-    let stuff = core::str::from_utf8(load_file_from_disk("poo.txt", image, &st).unwrap()).unwrap();
-    info!("pee = {:?}", stuff);
+    info!("Reading");
+    let kernel_slice = load_file_from_disk("efi\\kernel\\kernel", image, &st).unwrap();
+    info!("Read kernel");
+    //info!("pee = {:?}", kernel);
 
-    st.boot_services().stall(10_000_000);
-    Status::SUCCESS
+    //st.boot_services().stall(1_000_000);
+
+    info!("Parsing ELF file");
+    let kernel_elf = xmas_elf::ElfFile::new(kernel_slice).unwrap();
+    info!("Successfully parsed ELF file");
+    
+    log::trace!("exiting boot services");
+    let (system_table, mut memory_map) =
+        st.exit_boot_services(uefi::table::boot::MemoryType::LOADER_DATA);
+
+
+    loop{}
+    //Status::SUCCESS
 }
 
 fn load_file_from_disk(

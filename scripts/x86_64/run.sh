@@ -1,9 +1,17 @@
 #!/usr/bin/env bash
+set -e
+
 
 rm --force --recursive ./esp
 mkdir --parents ./esp/efi/boot
+mkdir --parents ./esp/efi/kernel
+
 cargo build --bin bootloader --target x86_64-unknown-uefi
+cargo build --bin kernel --target x86_64-unknown-none
+
 cp ../../target/x86_64-unknown-uefi/debug/bootloader.efi ./esp/efi/boot/bootx64.efi
+cp ../../target/x86_64-unknown-none/debug/kernel ./esp/efi/kernel
+
 printf "hihi\n你好\b" > ./esp/poo.txt
 qemu-system-x86_64 \
     -enable-kvm \
