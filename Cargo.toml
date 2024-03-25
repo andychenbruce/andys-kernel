@@ -1,7 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
-  "parts/kernel",
-  "parts/bootloader"
+  "crates/kernel",
+  "crates/bootloader"
 ]
 
