@@ -3,17 +3,18 @@
 
 mod elf_mapper;
 mod frame_allocator;
+mod make_stack;
+mod read_file;
 
-use core::ops::Deref;
-use core::ops::DerefMut;
 use uefi::prelude::*;
-use uefi::proto::media::file::File;
 
-use x86_64::structures::paging::PageSize;
+use x86_64::structures::paging::{PageSize, PhysFrame, Mapper};
+use x86_64::VirtAddr;
 use x86_64::{structures::paging::Size4KiB, PhysAddr};
 
 static mut WRITER: AndyWriter = AndyWriter {};
 
+const NUM_STACK_PAGES: u64 = 100;
 const UEFI_PHYSICAL_OFFSET: u64 = 0; //UEFI uses identity mapping
 
 #[entry]
@@ -21,7 +22,7 @@ fn main(image: Handle, mut st: SystemTable<Boot>) -> Status {
     uefi_services::init(&mut st).unwrap();
 
     eprintln!("Reading kernel file");
-    let kernel_slice = load_file_from_disk("efi\\kernel\\kernel", image, &st).unwrap();
+    let kernel_slice = read_file::load_file_from_disk("efi\\kernel\\kernel", image, &st).unwrap();
     let kernel_addr: PhysAddr = PhysAddr::new(kernel_slice as *const [u8] as *const u8 as u64);
     assert!(kernel_addr.is_aligned(Size4KiB::SIZE));
     eprintln!("Finished reading kernel file");
@@ -34,116 +35,48 @@ fn main(image: Handle, mut st: SystemTable<Boot>) -> Status {
     let (system_table, mut memory_map) =
         st.exit_boot_services(uefi::table::boot::MemoryType::LOADER_DATA);
 
+    eprintln!("enabling write protection on ring 0");
+    enable_write_protect_bit();
+    eprintln!("enabling no execute flag");
+    enable_nxe_bit();
+
+    eprintln!("bruh");
     memory_map.sort();
     let mut frame_allocator =
         frame_allocator::AndyFrameAllocator::new(memory_map.entries().copied());
 
+    eprintln!("Mapping ELF file to virtual memory");
     let (mut kernel_page_table, kernel_page_table_top_frame) =
         elf_mapper::map_elf_into_memory(kernel_addr, &kernel_elf, &mut frame_allocator);
+    eprintln!("Successfully mapped ELF file to virtual memory");
 
-    eprintln!("Done");
-    Status::SUCCESS
-}
+    let entry_point = VirtAddr::new(kernel_elf.header.pt2.entry_point());
+    let stack_top = make_stack::make_stack(&mut frame_allocator, NUM_STACK_PAGES);
 
-fn load_file_from_disk(
-    name: &str,
-    image: Handle,
-    st: &SystemTable<Boot>,
-) -> Result<&'static mut [u8], uefi::Error> {
-    let mut file_system_raw =
-        locate_and_open_protocol::<uefi::proto::media::fs::SimpleFileSystem>(image, st)?;
-    let file_system = file_system_raw.deref_mut();
+    eprintln!("identity mapping context switch function");
+    let context_switch_function = PhysAddr::new(context_switch as *const () as u64);
+    let context_switch_function_start_frame: PhysFrame =
+        PhysFrame::containing_address(context_switch_function);
+    for frame in PhysFrame::range_inclusive(
+        context_switch_function_start_frame,
+        context_switch_function_start_frame + 1,
+    ) {
+        unsafe {
+            let tlb = kernel_page_table
+                .identity_map(
+                    frame,
+                    x86_64::structures::paging::PageTableFlags::PRESENT,
+                    &mut frame_allocator,
+                )
+                .unwrap();
+            tlb.flush();
+        };
+    }
+    eprintln!("DONE identity mapping context switch function");
 
-    let mut root = file_system.open_volume()?;
-    let mut buf = [0u16; 256];
-
-    let filename =
-        uefi::CStr16::from_str_with_buf(name, &mut buf).expect("Failed to convert string to utf16");
-
-    let file_handle = root.open(
-        filename,
-        uefi::proto::media::file::FileMode::Read,
-        uefi::proto::media::file::FileAttribute::empty(),
-    )?;
-
-    let mut file = match file_handle.into_type()? {
-        uefi::proto::media::file::FileType::Regular(f) => f,
-        uefi::proto::media::file::FileType::Dir(_) => panic!(),
-    };
-
-    let file_info = file
-        .get_boxed_info::<uefi::proto::media::file::FileInfo>()
-        .unwrap();
-    let file_size = usize::try_from(file_info.file_size()).unwrap();
-
-    let file_ptr = st.boot_services().allocate_pages(
-        uefi::table::boot::AllocateType::AnyPages,
-        uefi::table::boot::MemoryType::LOADER_DATA,
-        ((file_size - 1) / 4096) + 1,
-    )? as *mut u8;
-
-    unsafe { core::ptr::write_bytes(file_ptr, 0, file_size) };
-    let file_slice = unsafe { core::slice::from_raw_parts_mut(file_ptr, file_size) };
-    file.read(file_slice).unwrap();
-
-    Ok(file_slice)
-}
-
-fn locate_and_open_protocol<P: uefi::proto::ProtocolPointer>(
-    image: Handle,
-    st: &SystemTable<Boot>,
-) -> Result<uefi::table::boot::ScopedProtocol<P>, uefi::Error> {
-    let this = st.boot_services();
-    let device_path = open_device_path_protocol(image, st)?;
-    let mut device_path = device_path.deref();
-
-    let fs_handle = this.locate_device_path::<P>(&mut device_path)?;
-
-    let opened_handle = unsafe {
-        this.open_protocol::<P>(
-            uefi::table::boot::OpenProtocolParams {
-                handle: fs_handle,
-                agent: image,
-                controller: None,
-            },
-            uefi::table::boot::OpenProtocolAttributes::Exclusive,
-        )
-    }?;
-
-    Ok(opened_handle)
-}
-
-fn open_device_path_protocol(
-    image: Handle,
-    st: &SystemTable<Boot>,
-) -> Result<uefi::table::boot::ScopedProtocol<uefi::proto::device_path::DevicePath>, uefi::Error> {
-    let this = st.boot_services();
-    let device_handle = unsafe {
-        this.open_protocol::<uefi::proto::loaded_image::LoadedImage>(
-            uefi::table::boot::OpenProtocolParams {
-                handle: image,
-                agent: image,
-                controller: None,
-            },
-            uefi::table::boot::OpenProtocolAttributes::Exclusive,
-        )
-    }?
-    .deref()
-    .device()
-    .unwrap();
-
-    let device_path = unsafe {
-        this.open_protocol::<uefi::proto::device_path::DevicePath>(
-            uefi::table::boot::OpenProtocolParams {
-                handle: device_handle,
-                agent: image,
-                controller: None,
-            },
-            uefi::table::boot::OpenProtocolAttributes::Exclusive,
-        )
-    }?;
-
-    Ok(device_path)
+    unsafe {
+        context_switch(kernel_page_table_top_frame, stack_top, entry_point);
+    }
 }
 
 #[panic_handler]
@@ -187,4 +120,32 @@ macro_rules! eprint {
 macro_rules! eprintln {
     () => ($crate::print!("\n"));
     ($($arg:tt)*) => ($crate::eprint!("{}\n", format_args!($($arg)*)));
+}
+
+unsafe fn context_switch(page_table: PhysFrame, stack_top: VirtAddr, entry_point: VirtAddr) -> ! {
+    unsafe {
+        core::arch::asm!(
+            r#"
+            xor rbp, rbp
+            mov cr3, {}
+            mov rsp, {}
+            jmp {}
+            "#,
+            in(reg) page_table.start_address().as_u64(),
+            in(reg) stack_top.as_u64(),
+            in(reg) entry_point.as_u64(),
+        );
+    }
+
+    unreachable!()
+}
+
+fn enable_nxe_bit() {
+    use x86_64::registers::control::{Efer, EferFlags};
+    unsafe { Efer::update(|efer| *efer |= EferFlags::NO_EXECUTE_ENABLE) }
+}
+
+fn enable_write_protect_bit() {
+    use x86_64::registers::control::{Cr0, Cr0Flags};
+    unsafe { Cr0::update(|cr0| *cr0 |= Cr0Flags::WRITE_PROTECT) };
 }

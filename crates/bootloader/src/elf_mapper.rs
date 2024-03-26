@@ -14,7 +14,6 @@ use x86_64::{
 pub fn map_elf_into_memory(
     kernel_offset: PhysAddr,
     kernel_file: &xmas_elf::ElfFile,
-    //kernel_page_table: &mut OffsetPageTable,
     frame_allocator: &mut AndyFrameAllocator,
 ) -> (OffsetPageTable<'static>, PhysFrame) {
     assert!(PhysAddr::new(kernel_file.input as *const [u8] as *const u8 as u64) == kernel_offset);
