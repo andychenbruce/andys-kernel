@@ -3,32 +3,65 @@
 
 use core::ops::Deref;
 use core::ops::DerefMut;
-use log::info;
 use uefi::prelude::*;
 use uefi::proto::media::file::File;
+
+use x86_64::structures::paging::Mapper;
+use x86_64::{
+    structures::paging::{
+        FrameAllocator, OffsetPageTable, Page, PageTable, PageTableFlags, PhysFrame, Size4KiB,
+    },
+    PhysAddr, VirtAddr,
+};
+
+const WRITER: AndyWriter = AndyWriter {};
+
+const UEFI_PHYSICAL_OFFSET: u64 = 0; //UEFI uses identity mapping
 
 #[entry]
 fn main(image: Handle, mut st: SystemTable<Boot>) -> Status {
     uefi_services::init(&mut st).unwrap();
-    
 
-    info!("Reading");
+    eprintln!("sup");
+    
+    eprintln!("Reading kernel file");
     let kernel_slice = load_file_from_disk("efi\\kernel\\kernel", image, &st).unwrap();
-    info!("Read kernel");
-    //info!("pee = {:?}", kernel);
+    let kernel_addr: PhysAddr = PhysAddr::new(kernel_slice as *const [u8] as *const u8 as u64);
+    eprintln!("Finished reading kernel file");
 
-    //st.boot_services().stall(1_000_000);
-
-    info!("Parsing ELF file");
+    eprintln!("Parsing ELF file");
     let kernel_elf = xmas_elf::ElfFile::new(kernel_slice).unwrap();
-    info!("Successfully parsed ELF file");
-    
-    log::trace!("exiting boot services");
+    eprintln!("Successfully parsed ELF file");
+
+    eprintln!("exiting boot services");
     let (system_table, mut memory_map) =
         st.exit_boot_services(uefi::table::boot::MemoryType::LOADER_DATA);
 
+    //let mut frame_allocator = AndyFrameAllocator::new(memory_map.entries().copied().map(UefiMemoryDescriptor));
+    let mut frame_allocator = AndyFrameAllocator::new();
+    let (mut kernel_page_table, kernel_page_table_top_frame) = {
+        let table_top_frame: PhysFrame =
+            frame_allocator.allocate_frame().expect("no unused frames");
+        eprintln!("New page table at: {:#?}", &table_top_frame);
+        let frame_addr = uefi_get_addr_of_frame(table_top_frame);
 
-    loop{}
+        let ptr = frame_addr.as_mut_ptr();
+        unsafe { *ptr = PageTable::new() };
+        let top_table = unsafe { &mut *ptr };
+        (
+            unsafe { OffsetPageTable::new(top_table, VirtAddr::new(UEFI_PHYSICAL_OFFSET)) },
+            table_top_frame,
+        )
+    };
+
+    load_elf_to_memory(
+        kernel_addr,
+        &kernel_elf,
+        &mut kernel_page_table,
+        &mut frame_allocator,
+    );
+
+    loop {}
     //Status::SUCCESS
 }
 
@@ -131,4 +164,153 @@ fn open_device_path_protocol(
     }?;
 
     Ok(device_path)
+}
+
+fn load_elf_to_memory(
+    kernel_offset: PhysAddr,
+    kernel_file: &xmas_elf::ElfFile,
+    kernel_page_table: &mut OffsetPageTable,
+    frame_allocator: &mut AndyFrameAllocator,
+) {
+    assert!(PhysAddr::new(kernel_file.input as *const [u8] as *const u8 as u64) == kernel_offset);
+    for program_header in kernel_file.program_iter() {
+        if !matches!(program_header, xmas_elf::program::ProgramHeader::Ph64(_)) {
+            panic!("only supports 64 bit elfs");
+        }
+
+        match program_header.get_type().unwrap() {
+            xmas_elf::program::Type::Load => {
+                handle_load_segment(
+                    kernel_offset,
+                    kernel_file,
+                    kernel_page_table,
+                    frame_allocator,
+                    program_header,
+                );
+            }
+            _ => {
+                todo!()
+            }
+        }
+    }
+}
+
+fn handle_load_segment(
+    kernel_addr: PhysAddr,
+    kernel_file: &xmas_elf::ElfFile,
+    kernel_page_table: &mut OffsetPageTable,
+    frame_allocator: &mut AndyFrameAllocator,
+    segment: xmas_elf::program::ProgramHeader,
+) {
+    assert!(matches!(
+        segment.get_type().unwrap(),
+        xmas_elf::program::Type::Load
+    ));
+
+    let data = match segment.get_data(kernel_file).unwrap() {
+        xmas_elf::program::SegmentData::Undefined(slice) => slice,
+        _ => todo!(),
+    };
+
+    {
+        let elf_offset = PhysAddr::new(kernel_file.input as *const [u8] as *const u8 as u64);
+        let segment_data_start = PhysAddr::new(data as *const [u8] as *const u8 as u64);
+        let segment_offset = segment.offset();
+        assert!(kernel_addr == elf_offset);
+        assert!(kernel_addr + segment_offset == segment_data_start);
+    }
+
+    let segment_start = kernel_addr + segment.offset();
+    let segment_end = segment_start + segment.file_size();
+
+    let segment_start_frame: PhysFrame = PhysFrame::containing_address(segment_start);
+    let segment_end_frame: PhysFrame = PhysFrame::containing_address(segment_end - 1);
+
+    let target_start = VirtAddr::new(segment.virtual_addr());
+    let target_start_page: Page = Page::containing_address(target_start);
+
+    let mut segment_flags = PageTableFlags::PRESENT;
+    if !segment.flags().is_execute() {
+        segment_flags |= PageTableFlags::NO_EXECUTE;
+    }
+    if segment.flags().is_write() {
+        segment_flags |= PageTableFlags::WRITABLE;
+    }
+
+    for from_frame in PhysFrame::range_inclusive(segment_start_frame, segment_end_frame) {
+        let offset = from_frame - segment_start_frame;
+        let target_page = target_start_page + offset;
+        let flusher = unsafe {
+            kernel_page_table
+                .map_to(target_page, from_frame, segment_flags, frame_allocator)
+                .unwrap()
+        };
+        flusher.ignore();
+    }
+}
+
+struct AndyFrameAllocator {
+    next_frame: PhysFrame,
+    memory_map: u32,
+}
+
+impl AndyFrameAllocator {
+    fn new() -> Self {
+        todo!()
+    }
+}
+
+unsafe impl FrameAllocator<Size4KiB> for AndyFrameAllocator {
+    fn allocate_frame(&mut self) -> Option<PhysFrame<Size4KiB>> {
+        todo!()
+    }
+}
+
+fn uefi_get_addr_of_frame(frame: PhysFrame) -> VirtAddr {
+    uefi_get_addr(frame.start_address())
+}
+
+fn uefi_get_addr(physical_addr: PhysAddr) -> VirtAddr {
+    VirtAddr::new(physical_addr.as_u64() - UEFI_PHYSICAL_OFFSET)
+}
+
+#[panic_handler]
+fn panic(info: &core::panic::PanicInfo) -> ! {
+    use core::arch::asm;
+
+    eprintln!("error: {}", info);
+
+    loop {
+        unsafe { asm!("cli; hlt") };
+    }
+}
+
+pub fn print(args: core::fmt::Arguments) {
+    use core::fmt::Write;
+    WRITER.write_fmt(args).unwrap();
+}
+
+struct AndyWriter {}
+
+impl core::fmt::Write for AndyWriter {
+    fn write_str(&mut self, s: &str) -> core::fmt::Result {
+        for b in s.bytes() {
+            unsafe {
+                let port: u16 = 0xe9;
+                core::arch::asm!("outb %al, %dx", in("al") b, in("dx") port, options(att_syntax));
+            };
+        }
+        Ok(())
+    }
+}
+
+#[macro_export]
+macro_rules! eprint {
+    ($($arg:tt)*) => ($crate::print(format_args!($($arg)*)));
+}
+
+#[macro_export]
+macro_rules! eprintln {
+    () => ($crate::print!("\n"));
+    ($($arg:tt)*) => ($crate::eprint!("{}\n", format_args!($($arg)*)));
 }
