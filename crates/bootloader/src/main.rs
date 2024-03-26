@@ -1,19 +1,16 @@
 #![no_main]
 #![no_std]
 
+mod elf_mapper;
+mod frame_allocator;
+
 use core::ops::Deref;
 use core::ops::DerefMut;
 use uefi::prelude::*;
 use uefi::proto::media::file::File;
 
-use x86_64::structures::paging::Mapper;
 use x86_64::structures::paging::PageSize;
-use x86_64::{
-    structures::paging::{
-        FrameAllocator, OffsetPageTable, Page, PageTable, PageTableFlags, PhysFrame, Size4KiB,
-    },
-    PhysAddr, VirtAddr,
-};
+use x86_64::{structures::paging::Size4KiB, PhysAddr};
 
 static mut WRITER: AndyWriter = AndyWriter {};
 
@@ -22,8 +19,6 @@ const UEFI_PHYSICAL_OFFSET: u64 = 0; //UEFI uses identity mapping
 #[entry]
 fn main(image: Handle, mut st: SystemTable<Boot>) -> Status {
     uefi_services::init(&mut st).unwrap();
-
-    eprintln!("sup");
 
     eprintln!("Reading kernel file");
     let kernel_slice = load_file_from_disk("efi\\kernel\\kernel", image, &st).unwrap();
@@ -40,31 +35,14 @@ fn main(image: Handle, mut st: SystemTable<Boot>) -> Status {
         st.exit_boot_services(uefi::table::boot::MemoryType::LOADER_DATA);
 
     memory_map.sort();
-    let mut frame_allocator = AndyFrameAllocator::new(memory_map.entries().copied());
-    let (mut kernel_page_table, kernel_page_table_top_frame) = {
-        let table_top_frame: PhysFrame =
-            frame_allocator.allocate_frame().expect("no unused frames");
-        eprintln!("New page table at: {:#?}", &table_top_frame);
-        let frame_addr = uefi_get_addr_of_frame(table_top_frame);
+    let mut frame_allocator =
+        frame_allocator::AndyFrameAllocator::new(memory_map.entries().copied());
 
-        let ptr = frame_addr.as_mut_ptr();
-        unsafe { *ptr = PageTable::new() };
-        let top_table = unsafe { &mut *ptr };
-        (
-            unsafe { OffsetPageTable::new(top_table, VirtAddr::new(UEFI_PHYSICAL_OFFSET)) },
-            table_top_frame,
-        )
-    };
+    let (mut kernel_page_table, kernel_page_table_top_frame) =
+        elf_mapper::map_elf_into_memory(kernel_addr, &kernel_elf, &mut frame_allocator);
 
-    load_elf_to_memory(
-        kernel_addr,
-        &kernel_elf,
-        &mut kernel_page_table,
-        &mut frame_allocator,
-    );
-
-    loop {}
-    //Status::SUCCESS
+    eprintln!("Done");
+    Status::SUCCESS
 }
 
 fn load_file_from_disk(
@@ -166,185 +144,6 @@ fn open_device_path_protocol(
     }?;
 
     Ok(device_path)
-}
-
-fn load_elf_to_memory(
-    kernel_offset: PhysAddr,
-    kernel_file: &xmas_elf::ElfFile,
-    kernel_page_table: &mut OffsetPageTable,
-    frame_allocator: &mut AndyFrameAllocator,
-) {
-    assert!(PhysAddr::new(kernel_file.input as *const [u8] as *const u8 as u64) == kernel_offset);
-    for program_header in kernel_file.program_iter() {
-        if !matches!(program_header, xmas_elf::program::ProgramHeader::Ph64(_)) {
-            panic!("only supports 64 bit elfs");
-        }
-
-        assert!(
-            (program_header.virtual_addr() % program_header.align())
-                == (program_header.offset() % program_header.align())
-        );
-
-        match program_header.get_type().unwrap() {
-            xmas_elf::program::Type::Load => {
-                handle_load_segment(
-                    kernel_offset,
-                    kernel_file,
-                    kernel_page_table,
-                    frame_allocator,
-                    program_header,
-                );
-            }
-            _ => {
-                todo!()
-            }
-        }
-    }
-}
-
-fn handle_load_segment(
-    kernel_addr: PhysAddr,
-    kernel_file: &xmas_elf::ElfFile,
-    kernel_page_table: &mut OffsetPageTable,
-    frame_allocator: &mut AndyFrameAllocator,
-    segment: xmas_elf::program::ProgramHeader,
-) {
-    assert!(matches!(
-        segment.get_type().unwrap(),
-        xmas_elf::program::Type::Load
-    ));
-
-    let data = match segment.get_data(kernel_file).unwrap() {
-        xmas_elf::program::SegmentData::Undefined(slice) => slice,
-        _ => todo!(),
-    };
-
-    {
-        let elf_offset = PhysAddr::new(kernel_file.input as *const [u8] as *const u8 as u64);
-        let segment_data_start = PhysAddr::new(data as *const [u8] as *const u8 as u64);
-        let segment_offset = segment.offset();
-        assert!(kernel_addr == elf_offset);
-        assert!(kernel_addr + segment_offset == segment_data_start);
-    }
-
-    let segment_start = kernel_addr + segment.offset();
-    let segment_end = segment_start + segment.file_size();
-
-    let segment_start_frame: PhysFrame = PhysFrame::containing_address(segment_start);
-    let segment_end_frame: PhysFrame = PhysFrame::containing_address(segment_end - 1);
-
-    let target_start = VirtAddr::new(segment.virtual_addr());
-    let target_start_page: Page = Page::containing_address(target_start);
-
-    eprintln!(
-        "loading segment in real memory in memory [{:?}..{:?}] to starting at page {:?}",
-        segment_start, segment_end, target_start_page
-    );
-
-    let mut segment_flags = PageTableFlags::PRESENT;
-    if !segment.flags().is_execute() {
-        segment_flags |= PageTableFlags::NO_EXECUTE;
-    }
-    if segment.flags().is_write() {
-        segment_flags |= PageTableFlags::WRITABLE;
-    }
-
-    for from_frame in PhysFrame::range_inclusive(segment_start_frame, segment_end_frame) {
-        let offset = from_frame - segment_start_frame;
-        let target_page = target_start_page + offset;
-        eprintln!("mapping frame {:?} to page {:?}", from_frame, target_page);
-
-        match unsafe {
-            kernel_page_table.map_to(target_page, from_frame, segment_flags, frame_allocator)
-        } {
-            Ok(flusher) => {
-                flusher.ignore();
-            }
-            Err(mapping_error) => {
-                if let x86_64::structures::paging::mapper::MapToError::PageAlreadyMapped(
-                    already_there_frame,
-                ) = mapping_error
-                {
-                    assert!(already_there_frame == from_frame);
-                } else {
-                    panic!("error mapping thing: {:?}", mapping_error);
-                }
-            }
-        }
-    }
-}
-
-struct AndyFrameAllocator<'a> {
-    next_frame: PhysFrame,
-    memory_map: core::iter::Copied<uefi::table::boot::MemoryMapIter<'a>>,
-    curr_descriptor: Option<uefi::table::boot::MemoryDescriptor>,
-}
-
-impl<'a> AndyFrameAllocator<'a> {
-    fn new(memory_map: core::iter::Copied<uefi::table::boot::MemoryMapIter<'a>>) -> Self {
-        AndyFrameAllocator {
-            //must skip frame 0 for null pointers
-            next_frame: PhysFrame::from_start_address(PhysAddr::new(0x1000)).unwrap(),
-            memory_map,
-            curr_descriptor: None,
-        }
-    }
-    fn allocate_frame_from_descriptor(
-        &mut self,
-        descriptor: uefi::table::boot::MemoryDescriptor,
-    ) -> Option<PhysFrame<Size4KiB>> {
-        let mem_len = descriptor.page_count * (uefi::table::boot::PAGE_SIZE as u64);
-        let mem_start = PhysAddr::new(descriptor.phys_start);
-        let mem_end = mem_start + mem_len;
-
-        let start_frame = PhysFrame::from_start_address(mem_start).unwrap();
-        let end_frame = PhysFrame::containing_address(mem_end - 1);
-
-        assert!(self.next_frame <= end_frame);
-        if self.next_frame <= start_frame {
-            self.next_frame = start_frame;
-        }
-
-        if self.next_frame <= end_frame {
-            let out = self.next_frame;
-            self.next_frame += 1;
-            return Some(out);
-        } else {
-            return None;
-        }
-    }
-}
-
-unsafe impl FrameAllocator<Size4KiB> for AndyFrameAllocator<'_> {
-    fn allocate_frame(&mut self) -> Option<PhysFrame<Size4KiB>> {
-        if let Some(descriptor) = self.curr_descriptor {
-            if let Some(success) = self.allocate_frame_from_descriptor(descriptor) {
-                return Some(success);
-            } else {
-                self.curr_descriptor = None;
-            }
-        }
-
-        while let Some(descriptor) = self.memory_map.next() {
-            let is_usable = descriptor.ty == uefi::table::boot::MemoryType::CONVENTIONAL;
-            if !is_usable {
-                continue;
-            }
-            if let Some(frame) = self.allocate_frame_from_descriptor(descriptor) {
-                self.curr_descriptor = Some(descriptor);
-                return Some(frame);
-            }
-        }
-        None
-    }
-}
-
-fn uefi_get_addr_of_frame(frame: PhysFrame) -> VirtAddr {
-    uefi_get_addr(frame.start_address())
-}
-
-fn uefi_get_addr(physical_addr: PhysAddr) -> VirtAddr {
-    VirtAddr::new(physical_addr.as_u64() - UEFI_PHYSICAL_OFFSET)
 }
 
 #[panic_handler]
